@@ -222,5 +222,5 @@ impl Default for Driver {
 
 #[cfg(feature = "std")]
 fn path_to_stdlib() -> PathBuf {
-    dirs::config_dir().unwrap().join("noir-lang").join("std")
+    dirs::config_dir().unwrap().join("noir-lang").join("std/src")
 }
