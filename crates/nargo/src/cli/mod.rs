@@ -152,3 +152,48 @@ fn add_std_lib(driver: &mut Driver) {
 fn path_to_stdlib() -> PathBuf {
     dirs::config_dir().unwrap().join("noir-lang").join("std/src")
 }
+
+// FIXME: I not sure that this is the right place for this tests.
+#[cfg(test)]
+mod tests {
+    use noirc_driver::Driver;
+    use noirc_frontend::graph::CrateType;
+
+    use std::path::{PathBuf, Path};
+
+    const TEST_DATA_DIR: &str = "tests/compile_tests_data";
+
+    /// Compiles a file and returns true if compilation was successful
+    ///
+    /// This is used for tests.
+    pub fn file_compiles<P: AsRef<Path>>(root_file: P) -> bool {
+        let mut driver = Driver::new();
+        driver.create_local_crate(&root_file, CrateType::Binary);
+        super::add_std_lib(&mut driver);
+        driver.file_compiles()
+    }
+
+    #[test]
+    fn compilation_pass() {
+        let mut pass_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        pass_dir.push(&format!("{TEST_DATA_DIR}/pass"));
+
+        let paths = std::fs::read_dir(pass_dir).unwrap();
+        for path in paths.flatten() {
+            let path = path.path();
+            assert!(file_compiles(&path), "path: {}", path.display());
+        }
+    }
+
+    #[test]
+    fn compilation_fail() {
+        let mut fail_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fail_dir.push(&format!("{TEST_DATA_DIR}/fail"));
+
+        let paths = std::fs::read_dir(fail_dir).unwrap();
+        for path in paths.flatten() {
+            let path = path.path();
+            assert!(!file_compiles(&path), "path: {}", path.display());
+        }
+    }
+}
