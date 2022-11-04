@@ -42,3 +42,33 @@ pub fn build_from_path<P: AsRef<Path>>(p: P) -> Result<(), CliError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    const TEST_DATA_DIR: &str = "tests/build_tests_data";
+
+    #[test]
+    fn pass() {
+        let mut pass_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        pass_dir.push(&format!("{TEST_DATA_DIR}/pass"));
+
+        let paths = std::fs::read_dir(pass_dir).unwrap();
+        for path in paths.flatten() {
+            let path = path.path();
+            assert!(super::build_from_path(path.clone()).is_ok(), "path: {}", path.display());
+        }
+    }
+
+    #[test]
+    #[ignore = "This test fails because the reporter exits the process with 1"]
+    fn fail() {
+        let mut fail_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fail_dir.push(&format!("{TEST_DATA_DIR}/fail"));
+
+        let paths = std::fs::read_dir(fail_dir).unwrap();
+        for path in paths.flatten() {
+            let path = path.path();
+            assert!(super::build_from_path(path.clone()).is_err(), "path: {}", path.display());
+        }
+    }
+}
