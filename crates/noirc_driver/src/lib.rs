@@ -104,7 +104,7 @@ impl Driver {
     }
 
     /// Propagates a given dependency to every other crate.
-    pub fn propagate_dep(&mut self, dep_to_propagate: CrateId, dep_to_propagate_name: CrateName) {
+    pub fn propagate_dep(&mut self, dep_to_propagate: CrateId, dep_to_propagate_name: &CrateName) {
         let crate_ids: Vec<_> = self
             .context
             .crate_graph

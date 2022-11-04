@@ -146,7 +146,7 @@ fn add_std_lib(driver: &mut Driver) {
     let path_to_std_lib_file = path_to_stdlib().join("lib.nr");
     let std_crate = driver.create_non_local_crate(path_to_std_lib_file, CrateType::Library);
     let std_crate_name = "std";
-    driver.propagate_dep(std_crate, CrateName::new(std_crate_name).unwrap());
+    driver.propagate_dep(std_crate, &CrateName::new(std_crate_name).unwrap());
 }
 
 fn path_to_stdlib() -> PathBuf {
