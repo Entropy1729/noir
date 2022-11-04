@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::{errors::CliError, resolver::Resolver};
 
-use super::{create_named_dir, write_to_file, BUILD_DIR, add_std_lib};
+use super::{add_std_lib, create_named_dir, write_to_file, BUILD_DIR};
 
 pub(crate) fn run(args: ArgMatches) -> Result<(), CliError> {
     let args = args.subcommand_matches("compile").unwrap();

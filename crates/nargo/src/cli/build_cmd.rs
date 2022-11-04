@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{errors::CliError, resolver::Resolver};
 
-use super::{write_to_file, PROVER_INPUT_FILE, VERIFIER_INPUT_FILE, add_std_lib};
+use super::{add_std_lib, write_to_file, PROVER_INPUT_FILE, VERIFIER_INPUT_FILE};
 
 pub(crate) fn run(_args: ArgMatches) -> Result<(), CliError> {
     let package_dir = std::env::current_dir().unwrap();

@@ -1,7 +1,7 @@
 pub use build_cmd::build_from_path;
 use clap::{App, Arg};
 use noirc_driver::Driver;
-use noirc_frontend::graph::{CrateType, CrateName};
+use noirc_frontend::graph::{CrateName, CrateType};
 use std::{
     fs::File,
     io::Write,

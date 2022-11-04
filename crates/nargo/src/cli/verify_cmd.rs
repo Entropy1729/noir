@@ -68,7 +68,7 @@ pub fn verify_with_path<P: AsRef<Path>>(
 ) -> Result<bool, CliError> {
     let mut driver = Resolver::resolve_root_config(program_dir.as_ref())?;
     let backend = crate::backends::ConcreteBackend;
-    
+
     super::add_std_lib(&mut driver);
     let compiled_program = driver.into_compiled_program(backend.np_language(), show_ssa);
 
