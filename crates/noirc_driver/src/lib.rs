@@ -37,11 +37,9 @@ impl Driver {
     /// Compiles a file and returns true if compilation was successful
     ///
     /// This is used for tests.
-    pub fn file_compiles<P: AsRef<Path>>(root_file: P) -> bool {
-        let mut driver = Driver::new();
-        driver.create_local_crate(root_file, CrateType::Binary);
+    pub fn file_compiles(&mut self) -> bool {
         let mut errs = vec![];
-        CrateDefMap::collect_defs(LOCAL_CRATE, &mut driver.context, &mut errs);
+        CrateDefMap::collect_defs(LOCAL_CRATE, &mut self.context, &mut errs);
         for errors in &errs {
             dbg!(errors);
         }
