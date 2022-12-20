@@ -4,10 +4,15 @@ mod merkle;
 mod schnorr;
 mod ecdsa_secp256k1;
 mod scalar_mul;
+mod sha256;
+mod sha512;
 
 
-#[foreign(to_bits)]
+#[builtin(to_bits)]
 fn to_bits(_x : Field, _bit_size: u32) -> [u1; 256] {}
+
+#[builtin(to_bytes)]
+fn to_bytes(_x : Field, _byte_size: u32) -> [u8; 32] {}
 
 // Returns base^exponent. 
 // ^ means to the power of and not xor

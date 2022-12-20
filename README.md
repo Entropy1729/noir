@@ -14,37 +14,37 @@ Once you have read through the documentation, you can also run the examples loca
 
 Backends:
 
- - Barretenberg via FFI
- - Marlin via arkworks
+- Barretenberg via FFI
+- Marlin via arkworks
 
 Compiler:
 
- - Module System
- - For expressions
- - Arrays
- - Bit Operations
- - Binary operations (<, <=, >, >=, +, -, *, /, %) [See documentation for an extensive list]
- - Unsigned integers
- - If statements
- - Structures and Tuples
- - Generics
+- Module System
+- For expressions
+- Arrays
+- Bit Operations
+- Binary operations (<, <=, >, >=, +, -, \*, /, %) [See documentation for an extensive list]
+- Unsigned integers
+- If statements
+- Structures and Tuples
+- Generics
 
 ACIR Supported OPCODES:
 
- - Sha256
- - Blake2s
- - Schnorr signature verification
- - MerkleMembership
- - Pedersen
- - HashToField
+- Sha256
+- Blake2s
+- Schnorr signature verification
+- MerkleMembership
+- Pedersen
+- HashToField
 
 ## Future Work
 
-The current focus is to gather as much feedback as possible while in the alpha phase. The main focusses of Noir are _safety_ and _developer experience_. If you find a feature that does not seem to be inline with these goals, please open an issue!
+The current focus is to gather as much feedback as possible while in the alpha phase. The main focuses of Noir are _safety_ and _developer experience_. If you find a feature that does not seem to be in line with these goals, please open an issue!
 
 Concretely the following items are on the road map:
 
-- General code sanitisation and documentation (on-going effort)
+- General code sanitisation and documentation (ongoing effort)
 - Prover and Verifier Key logic. (Prover and Verifier preprocess per compile)
 - Fallback mechanism for backend unsupported opcodes
 - Visibility modifiers
@@ -52,6 +52,14 @@ Concretely the following items are on the road map:
 - Backend integration: (Bulletproofs)
 - Recursion
 - Big integers
+
+## Nargo CLI - pre-built
+
+`nargo` - command line interface tool for interacting with Noir programs - allows compiling, proving, verifying, and more. Nightly binary builds can be found [here](https://github.com/noir-lang/noir/releases/tag/nightly). Please refer [noir-lang/build-nargo](https://github.com/noir-lang/build-nargo) to inspect how these are built for various platforms.
+
+## Nargo CLI - install scripts
+
+[noir-lang/noirup](https://github.com/noir-lang/noirup) repository contains install scripts for Linux, macOS, and Windows systems to allow easy installation.
 
 ## License
 

@@ -1,3 +1,4 @@
+use iter_extended::vecmap;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::{
@@ -7,7 +8,6 @@ use crate::{
         stmt::{HirAssignStatement, HirLValue, HirLetStatement, HirPattern, HirStatement},
     },
     node_interner::{self, NodeInterner, StmtId},
-    util::vecmap,
     Comptime, FunctionKind, TypeBinding, TypeBindings,
 };
 
@@ -196,9 +196,9 @@ impl Monomorphiser {
                 Literal(Integer(value, typ))
             }
             HirExpression::Literal(HirLiteral::Array(array)) => {
-                let element_type = Self::convert_type(&self.interner.id_type(array.contents[0]));
-                let contents = vecmap(array.contents, |id| self.expr_infer(id));
-                Literal(Array(ast::ArrayLiteral { length: array.length, contents, element_type }))
+                let element_type = Self::convert_type(&self.interner.id_type(array[0]));
+                let contents = vecmap(array, |id| self.expr_infer(id));
+                Literal(Array(ast::ArrayLiteral { contents, element_type }))
             }
             HirExpression::Block(block) => self.block(block.0),
 

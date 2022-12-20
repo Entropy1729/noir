@@ -1,8 +1,9 @@
 use acvm::FieldElement;
+use iter_extended::vecmap;
 use noirc_abi::Abi;
 use noirc_errors::Location;
 
-use crate::{util::vecmap, BinaryOpKind, Signedness};
+use crate::{BinaryOpKind, Signedness};
 
 #[derive(Debug, Clone)]
 pub enum Expression {
@@ -90,7 +91,6 @@ pub struct Cast {
 
 #[derive(Debug, Clone)]
 pub struct ArrayLiteral {
-    pub length: u128,
     pub contents: Vec<Expression>,
     pub element_type: Type,
 }

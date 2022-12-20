@@ -2,8 +2,11 @@ use num_bigint::BigUint;
 use num_traits::One;
 
 use crate::{
-    errors::RuntimeError,
-    ssa::{node::ObjectType, optim},
+    errors::{self, RuntimeError},
+    ssa::{
+        node::{Mark, ObjectType},
+        optim,
+    },
 };
 
 use super::{
@@ -54,14 +57,14 @@ impl AssumptionId {
 }
 
 //temporary data used to build the decision tree
-struct TreeBuilder {
+pub struct TreeBuilder {
     pub join_to_process: Vec<BlockId>,
     pub stack: StackFrame,
 }
 
 impl TreeBuilder {
-    pub fn new() -> TreeBuilder {
-        TreeBuilder { join_to_process: Vec::new(), stack: StackFrame::new(BlockId::dummy()) }
+    pub fn new(entry: BlockId) -> TreeBuilder {
+        TreeBuilder { join_to_process: Vec::new(), stack: StackFrame::new(entry) }
     }
 }
 
@@ -197,11 +200,14 @@ impl DecisionTree {
         ins
     }
 
-    pub fn make_decision_tree(&mut self, ctx: &mut SsaContext, entry_block: BlockId) {
-        let mut builder = TreeBuilder::new();
-        builder.stack.block = entry_block;
+    pub fn make_decision_tree(
+        &mut self,
+        ctx: &mut SsaContext,
+        mut builder: TreeBuilder,
+    ) -> Result<(), RuntimeError> {
+        let entry_block = builder.stack.block;
         ctx[entry_block].assumption = self.root;
-        self.decision_tree(ctx, entry_block, &mut builder);
+        self.decision_tree(ctx, entry_block, &mut builder)
     }
 
     //Returns a boolean to indicate if we should process the children (true) of not (false) of the block
@@ -210,7 +216,7 @@ impl DecisionTree {
         ctx: &mut SsaContext,
         current: BlockId,
         data: &mut TreeBuilder,
-    ) -> Vec<BlockId> {
+    ) -> Result<Vec<BlockId>, RuntimeError> {
         data.stack.block = current;
         let mut block_assumption = ctx[current].assumption;
         let assumption = &self[block_assumption];
@@ -246,8 +252,7 @@ impl DecisionTree {
             }
 
             //find exit node:
-            let exit =
-                block::find_join(ctx, current_block.left.unwrap(), current_block.right.unwrap());
+            let exit = block::find_join(ctx, current_block.id);
             debug_assert!(ctx[exit].kind == BlockType::IfJoin);
             if_decision.entry_block = current;
             if_decision.exit_block = exit;
@@ -278,18 +283,23 @@ impl DecisionTree {
 
         ctx[current].assumption = block_assumption;
         self.compute_assumption(ctx, current);
-        self.conditionalize_block(ctx, current, &mut data.stack);
-        result
+        self.conditionalize_block(ctx, current, &mut data.stack)?;
+        Ok(result)
     }
 
-    fn decision_tree(&mut self, ctx: &mut SsaContext, current: BlockId, data: &mut TreeBuilder) {
+    fn decision_tree(
+        &mut self,
+        ctx: &mut SsaContext,
+        current: BlockId,
+        data: &mut TreeBuilder,
+    ) -> Result<(), RuntimeError> {
         let mut queue = vec![current]; //Stack of elements to visit
 
         while let Some(current) = queue.pop() {
-            let children = self.process_block(ctx, current, data);
+            let children = self.process_block(ctx, current, data)?;
 
             let mut test_and_push = |block_id: BlockId| {
-                if block_id != BlockId::dummy() && !queue.contains(&block_id) {
+                if !block_id.is_dummy() && !queue.contains(&block_id) {
                     queue.push(block_id);
                 }
             };
@@ -298,6 +308,7 @@ impl DecisionTree {
                 test_and_push(i);
             }
         }
+        Ok(())
     }
 
     pub fn reduce(
@@ -314,7 +325,7 @@ impl DecisionTree {
             self.reduce(ctx, i)?;
         }
         //reduce the node
-        if assumption.entry_block != BlockId::dummy() {
+        if !assumption.entry_block.is_dummy() {
             self.reduce_sub_graph(ctx, assumption.entry_block, assumption.exit_block)?;
         }
         Ok(())
@@ -333,18 +344,28 @@ impl DecisionTree {
         let left = if_block.left.unwrap();
         let right = if_block.right.unwrap();
         let mut const_condition = None;
-        if self[if_block.assumption].condition == ctx.one() {
+        if ctx.is_one(self[if_block.assumption].condition) {
             const_condition = Some(true);
         }
-        if self[if_block.assumption].condition == ctx.zero() {
+        if ctx.is_zero(self[if_block.assumption].condition) {
             const_condition = Some(false);
         }
 
         //merge then branch
-        to_remove.extend(block::merge_path(ctx, left, exit_block_id));
+        to_remove.extend(block::merge_path(
+            ctx,
+            left,
+            exit_block_id,
+            self[ctx[left].assumption].value,
+        ));
 
         //merge else branch
-        to_remove.extend(block::merge_path(ctx, right, exit_block_id));
+        to_remove.extend(block::merge_path(
+            ctx,
+            right,
+            exit_block_id,
+            self[ctx[right].assumption].value,
+        ));
 
         to_remove.push(right);
         let mut merged_ins;
@@ -383,13 +404,14 @@ impl DecisionTree {
         ctx: &mut SsaContext,
         block: BlockId,
         stack: &mut StackFrame,
-    ) {
+    ) -> Result<(), RuntimeError> {
         let assumption_id = ctx[block].assumption;
         let instructions = ctx[block].instructions.clone();
-        self.conditionalise_inline(ctx, &instructions, stack, assumption_id);
+        self.conditionalise_inline(ctx, &instructions, stack, assumption_id)?;
         ctx[block].instructions.clear();
         ctx[block].instructions.append(&mut stack.stack);
         assert!(stack.stack.is_empty());
+        Ok(())
     }
 
     pub fn conditionalise_inline(
@@ -398,12 +420,16 @@ impl DecisionTree {
         instructions: &[NodeId],
         result: &mut StackFrame,
         predicate: AssumptionId,
-    ) {
+    ) -> Result<(), RuntimeError> {
         if predicate == AssumptionId::dummy() || self[predicate].value != Some(ctx.zero()) {
+            let mut short_circuit = false;
             for i in instructions {
-                self.conditionalise_into(ctx, result, *i, predicate);
+                if !self.conditionalise_into(ctx, result, *i, predicate, short_circuit)? {
+                    short_circuit = true;
+                }
             }
         }
+        Ok(())
     }
 
     //assigns the arrays to the block where they are seen for the first time
@@ -417,13 +443,50 @@ impl DecisionTree {
         }
     }
 
+    fn short_circuit(
+        ctx: &mut SsaContext,
+        stack: &mut StackFrame,
+        condition: NodeId,
+        error_msg: &str,
+    ) -> Result<(), RuntimeError> {
+        if ctx.under_assumption(condition) {
+            let avoid = stack.stack.contains(&condition).then_some(&condition);
+            block::zero_instructions(ctx, &stack.stack, avoid);
+            let nop = stack.stack[0];
+            stack.stack.clear();
+            stack.stack.push(nop);
+            if avoid.is_some() {
+                stack.stack.push(condition);
+            }
+            let operation =
+                Operation::Cond { condition, val_true: ctx.zero(), val_false: ctx.one() };
+            let cond = ctx.add_instruction(Instruction::new(
+                operation,
+                ObjectType::Boolean,
+                Some(stack.block),
+            ));
+            stack.push(cond);
+            let unreachable = Operation::Constrain(cond, None);
+            let ins2 = ctx.add_instruction(Instruction::new(
+                unreachable,
+                ObjectType::NotAnObject,
+                Some(stack.block),
+            ));
+            stack.push(ins2);
+            Ok(())
+        } else {
+            Err(errors::RuntimeErrorKind::Spanless(error_msg.to_string()).into())
+        }
+    }
+
     pub fn conditionalise_into(
         &self,
         ctx: &mut SsaContext,
         stack: &mut StackFrame,
         ins_id: NodeId,
         predicate: AssumptionId,
-    ) {
+        short_circtuit: bool,
+    ) -> Result<bool, RuntimeError> {
         let ass_cond;
         let ass_value;
         if predicate == AssumptionId::dummy() {
@@ -452,126 +515,228 @@ impl DecisionTree {
         }
 
         let ins = ins1.clone();
-        match &ins.operation {
-            Operation::Phi { block_args, .. } => {
-                if ctx[stack.block].kind == BlockType::IfJoin {
-                    assert_eq!(block_args.len(), 2);
-                    let ins2 = ctx.get_mut_instruction(ins_id);
-                    ins2.operation = Operation::Cond {
-                        condition: ass_cond,
-                        val_true: block_args[0].0,
-                        val_false: block_args[1].0,
-                    };
-                    optim::simplify_id(ctx, ins_id).unwrap();
-                }
-                stack.push(ins_id);
+        if short_circtuit {
+            stack.set_zero(ctx, ins.res_type);
+            let ins2 = ctx.get_mut_instruction(ins_id);
+            if ins2.res_type == ObjectType::NotAnObject {
+                ins2.mark = Mark::Deleted;
+            } else {
+                ins2.mark = Mark::ReplaceWith(stack.get_zero(ins2.res_type));
             }
-            Operation::Binary(binop) => {
-                stack.push(ins_id);
-                if !ctx.is_one(ass_value) {
-                    assert!(binop.predicate.is_none());
+        } else {
+            match &ins.operation {
+                Operation::Phi { block_args, .. } => {
+                    if ctx[stack.block].kind == BlockType::IfJoin {
+                        assert_eq!(block_args.len(), 2);
+                        let ins2 = ctx.get_mut_instruction(ins_id);
+                        ins2.operation = Operation::Cond {
+                            condition: ass_cond,
+                            val_true: block_args[0].0,
+                            val_false: block_args[1].0,
+                        };
+                        optim::simplify_id(ctx, ins_id).unwrap();
+                    }
+                    stack.push(ins_id);
+                }
+
+                Operation::Load { array_id, index } => {
+                    if let Some(idx) = ctx.get_as_constant(*index) {
+                        if (idx.to_u128() as u32) >= ctx.mem[*array_id].len {
+                            let error = format!(
+                                "index out of bounds: the len is {} but the index is {}",
+                                ctx.mem[*array_id].len,
+                                idx.to_u128()
+                            );
+                            DecisionTree::short_circuit(ctx, stack, ass_value, &error)?;
+                            return Ok(false);
+                        }
+                    }
+                    stack.push(ins_id);
+                }
+                Operation::Binary(binop) => {
+                    let mut cond = ass_value;
+                    if let Some(pred) = binop.predicate {
+                        assert_ne!(pred, NodeId::dummy());
+                        if ass_value == NodeId::dummy() {
+                            cond = pred;
+                        } else {
+                            let op = Operation::Binary(node::Binary {
+                                lhs: ass_value,
+                                rhs: pred,
+                                operator: BinaryOp::Mul,
+                                predicate: None,
+                            });
+                            cond = ctx.add_instruction(Instruction::new(
+                                op,
+                                ObjectType::Boolean,
+                                Some(stack.block),
+                            ));
+                            optim::simplify_id(ctx, cond).unwrap();
+                            stack.push(cond);
+                        }
+                    }
+                    stack.push(ins_id);
                     match binop.operator {
                         BinaryOp::Udiv
                         | BinaryOp::Sdiv
                         | BinaryOp::Urem
                         | BinaryOp::Srem
                         | BinaryOp::Div => {
-                            let ins2 = ctx.get_mut_instruction(ins_id);
-                            ins2.operation = Operation::Binary(crate::node::Binary {
-                                lhs: binop.lhs,
-                                rhs: binop.rhs,
-                                operator: binop.operator.clone(),
-                                predicate: Some(ass_value),
-                            });
+                            if ctx.is_zero(binop.rhs) {
+                                DecisionTree::short_circuit(
+                                    ctx,
+                                    stack,
+                                    cond,
+                                    "attempt to divide by zero",
+                                )?;
+                                return Ok(false);
+                            }
+                            if ctx.under_assumption(cond) {
+                                let ins2 = ctx.get_mut_instruction(ins_id);
+                                ins2.operation = Operation::Binary(crate::node::Binary {
+                                    lhs: binop.lhs,
+                                    rhs: binop.rhs,
+                                    operator: binop.operator.clone(),
+                                    predicate: Some(cond),
+                                });
+                            }
                         }
                         _ => (),
                     }
                 }
-            }
-            Operation::Store { array_id, index, value } => {
-                if !ins.operation.is_dummy_store()
-                    && ctx.under_assumption(ass_value)
-                    && stack.created_arrays[array_id] != stack.block
-                {
-                    let load = Operation::Load { array_id: *array_id, index: *index };
-                    let e_type = ctx.mem[*array_id].element_type;
-                    let dummy =
-                        ctx.add_instruction(Instruction::new(load, e_type, Some(stack.block)));
-                    let operation = Operation::Cond {
-                        condition: ass_value,
-                        val_true: *value,
-                        val_false: dummy,
-                    };
-                    let cond =
-                        ctx.add_instruction(Instruction::new(operation, e_type, Some(stack.block)));
+                Operation::Store { array_id, index, value } => {
+                    if !ins.operation.is_dummy_store() {
+                        if let Some(idx) = ctx.get_as_constant(*index) {
+                            if (idx.to_u128() as u32) >= ctx.mem[*array_id].len {
+                                let error = format!(
+                                    "index out of bounds: the len is {} but the index is {}",
+                                    ctx.mem[*array_id].len,
+                                    idx.to_u128()
+                                );
+                                DecisionTree::short_circuit(ctx, stack, ass_value, &error)?;
+                                return Ok(false);
+                            }
+                        }
+                        if (stack.created_arrays[array_id] != stack.block
+                            || stack.return_arrays.contains(array_id))
+                            && ctx.under_assumption(ass_value)
+                        {
+                            let load = Operation::Load { array_id: *array_id, index: *index };
+                            let e_type = ctx.mem[*array_id].element_type;
+                            let dummy = ctx.add_instruction(Instruction::new(
+                                load,
+                                e_type,
+                                Some(stack.block),
+                            ));
+                            let operation = Operation::Cond {
+                                condition: ass_value,
+                                val_true: *value,
+                                val_false: dummy,
+                            };
+                            let cond = ctx.add_instruction(Instruction::new(
+                                operation,
+                                e_type,
+                                Some(stack.block),
+                            ));
 
-                    stack.push(dummy);
-                    stack.push(cond);
-                    //store the conditional value
-                    let ins2 = ctx.get_mut_instruction(ins_id);
-                    ins2.operation =
-                        Operation::Store { array_id: *array_id, index: *index, value: cond };
-                }
-                stack.push(ins_id);
-            }
-            Operation::Intrinsic(_, _) => {
-                stack.push(ins_id);
-                if ctx.under_assumption(ass_value) {
-                    if let ObjectType::Pointer(a) = ins.res_type {
-                        if stack.created_arrays[&a] != stack.block {
-                            let array = &ctx.mem[a].clone();
-                            let name = array.name.to_string() + DUPLICATED;
-                            ctx.new_array(&name, array.element_type, array.len, None);
-                            let array_dup = ctx.mem.last_id();
+                            stack.push(dummy);
+                            stack.push(cond);
+                            //store the conditional value
                             let ins2 = ctx.get_mut_instruction(ins_id);
-                            ins2.res_type = ObjectType::Pointer(array_dup);
+                            ins2.operation = Operation::Store {
+                                array_id: *array_id,
+                                index: *index,
+                                value: cond,
+                            };
+                        }
+                    }
+                    stack.push(ins_id);
+                }
+                Operation::Intrinsic(_, _) => {
+                    stack.push(ins_id);
+                    if ctx.under_assumption(ass_value) {
+                        if let ObjectType::Pointer(a) = ins.res_type {
+                            if stack.created_arrays[&a] != stack.block {
+                                let array = &ctx.mem[a].clone();
+                                let name = array.name.to_string() + DUPLICATED;
+                                ctx.new_array(&name, array.element_type, array.len, None);
+                                let array_dup = ctx.mem.last_id();
+                                let ins2 = ctx.get_mut_instruction(ins_id);
+                                ins2.res_type = ObjectType::Pointer(array_dup);
 
-                            let mut memcpy_stack = StackFrame::new(stack.block);
-                            ctx.memcpy_inline(
-                                ins.res_type,
-                                ObjectType::Pointer(array_dup),
-                                &mut memcpy_stack,
-                            );
-                            self.conditionalise_inline(ctx, &memcpy_stack.stack, stack, predicate);
+                                let mut memcpy_stack = StackFrame::new(stack.block);
+                                ctx.memcpy_inline(
+                                    ins.res_type,
+                                    ObjectType::Pointer(array_dup),
+                                    &mut memcpy_stack,
+                                );
+                                self.conditionalise_inline(
+                                    ctx,
+                                    &memcpy_stack.stack,
+                                    stack,
+                                    predicate,
+                                )?;
+                            }
                         }
                     }
                 }
-            }
 
-            Operation::Call {
-                func_id, arguments, returned_arrays, predicate: ins_pred, ..
-            } => {
-                if ctx.under_assumption(ass_value) {
-                    assert!(*ins_pred == AssumptionId::dummy());
-                    let mut ins2 = ctx.get_mut_instruction(ins_id);
-                    ins2.operation = Operation::Call {
-                        func_id: *func_id,
-                        arguments: arguments.clone(),
-                        returned_arrays: returned_arrays.clone(),
-                        predicate,
-                    };
+                Operation::Call {
+                    func_id,
+                    arguments,
+                    returned_arrays,
+                    predicate: ins_pred,
+                    ..
+                } => {
+                    if ctx.under_assumption(ass_value) {
+                        assert!(*ins_pred == AssumptionId::dummy());
+                        let mut ins2 = ctx.get_mut_instruction(ins_id);
+                        ins2.operation = Operation::Call {
+                            func_id: *func_id,
+                            arguments: arguments.clone(),
+                            returned_arrays: returned_arrays.clone(),
+                            predicate,
+                        };
+                    }
+                    stack.push(ins_id);
                 }
-                stack.push(ins_id);
-            }
-            Operation::Constrain(expr, loc) => {
-                if ctx.under_assumption(ass_value) {
-                    let operation = Operation::Cond {
-                        condition: ass_value,
-                        val_true: *expr,
-                        val_false: ctx.one(),
-                    };
-                    let cond = ctx.add_instruction(Instruction::new(
-                        operation,
-                        ObjectType::Boolean,
-                        Some(stack.block),
-                    ));
-                    stack.push(cond);
-                    let ins2 = ctx.get_mut_instruction(ins_id);
-                    ins2.operation = Operation::Constrain(cond, *loc);
+                Operation::Constrain(expr, loc) => {
+                    if ctx.under_assumption(ass_value) {
+                        let operation = Operation::Cond {
+                            condition: ass_value,
+                            val_true: *expr,
+                            val_false: ctx.one(),
+                        };
+                        if ctx.is_zero(*expr) {
+                            stack.clear();
+                        }
+                        let cond = ctx.add_instruction(Instruction::new(
+                            operation,
+                            ObjectType::Boolean,
+                            Some(stack.block),
+                        ));
+                        stack.push(cond);
+                        let ins2 = ctx.get_mut_instruction(ins_id);
+                        ins2.operation = Operation::Constrain(cond, *loc);
+                        if ctx.is_zero(*expr) {
+                            stack.push(ins_id);
+                            return Ok(false);
+                        }
+                    }
+                    stack.push(ins_id);
                 }
-                stack.push(ins_id);
+                _ => stack.push(ins_id),
             }
-            _ => stack.push(ins_id),
+        }
+
+        Ok(true)
+    }
+
+    pub fn get_assumption_value(&self, assumption: AssumptionId) -> Option<NodeId> {
+        if assumption == AssumptionId::dummy() {
+            None
+        } else {
+            self[assumption].value
         }
     }
 
@@ -728,28 +893,18 @@ pub fn unroll_if(
     let left = if_block.left.unwrap();
     let right = if_block.right.unwrap();
     debug_assert!(if_block.kind == BlockType::Normal);
-    let exit = block::find_join(ctx, if_block.left.unwrap(), if_block.right.unwrap());
-
-    // simple mode:
-    if unroll_ctx.unroll_into == BlockId::dummy() || unroll_ctx.unroll_into == unroll_ctx.to_unroll
-    {
-        unroll_ctx.unroll_into = unroll_ctx.to_unroll;
-        flatten::unroll_std_block(ctx, unroll_ctx)?;
-        unroll_ctx.to_unroll = left;
-        unroll_ctx.unroll_into = left;
-        flatten::unroll_std_block(ctx, unroll_ctx)?;
-        unroll_ctx.to_unroll = right;
-        unroll_ctx.unroll_into = right;
-        flatten::unroll_std_block(ctx, unroll_ctx)?;
-        unroll_ctx.to_unroll = exit;
-        unroll_ctx.unroll_into = exit;
-        return Ok(exit);
-    }
+    let exit = block::find_join(ctx, if_block.id);
 
     //2. create the IF subgraph
-    //the unroll_into is required and will be used as the prev block
-    let prev = unroll_ctx.unroll_into;
-    let (new_entry, new_exit) = create_if_subgraph(ctx, prev);
+    let (new_entry, new_exit) =
+        if unroll_ctx.unroll_into.is_dummy() || unroll_ctx.unroll_into == unroll_ctx.to_unroll {
+            // simple mode:
+            create_if_subgraph(ctx, unroll_ctx.to_unroll, true)
+        } else {
+            //the unroll_into is required and will be used as the prev block
+            let prev = unroll_ctx.unroll_into;
+            create_if_subgraph(ctx, prev, false)
+        };
     unroll_ctx.unroll_into = new_entry;
 
     //3 Process the entry_block
@@ -781,10 +936,18 @@ pub fn unroll_if(
 }
 
 //create the subgraph for unrolling IF statement
-fn create_if_subgraph(ctx: &mut SsaContext, prev_block: BlockId) -> (BlockId, BlockId) {
+fn create_if_subgraph(
+    ctx: &mut SsaContext,
+    prev_block: BlockId,
+    simple_mode: bool,
+) -> (BlockId, BlockId) {
     //Entry block
     ctx.current_block = prev_block;
-    let new_entry = block::new_sealed_block(ctx, block::BlockType::Normal, true);
+    let new_entry = if simple_mode {
+        prev_block
+    } else {
+        block::new_sealed_block(ctx, block::BlockType::Normal, true)
+    };
     //Then block
     ctx.current_block = new_entry;
     block::new_sealed_block(ctx, block::BlockType::Normal, true);

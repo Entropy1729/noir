@@ -12,7 +12,6 @@ use crate::hir::type_check::type_check;
 use crate::hir::type_check::type_check_func;
 use crate::hir::Context;
 use crate::node_interner::{FuncId, NodeInterner, StmtId, StructId};
-use crate::util::vecmap;
 use crate::{
     Generics, Ident, LetStatement, NoirFunction, NoirStruct, ParsedModule, Path, Statement, Type,
 };
@@ -20,6 +19,8 @@ use fm::FileId;
 use noirc_errors::CollectedErrors;
 use noirc_errors::DiagnosableError;
 use std::collections::{BTreeMap, HashMap};
+
+use iter_extended::vecmap;
 
 /// Stores all of the unresolved functions in a particular file/mod
 pub struct UnresolvedFunctions {
@@ -149,11 +150,11 @@ impl DefCollector {
             }
         }
 
-        resolve_structs(context, def_collector.collected_types, crate_id, errors);
-
         // We must first resolve and intern the globals before we can resolve any stmts inside each function.
         // Each function uses its own resolver with a newly created ScopeForest, and must be resolved again to be within a function's scope
         let file_global_ids = resolve_globals(context, def_collector.collected_globals, crate_id);
+
+        resolve_structs(context, def_collector.collected_types, crate_id, errors);
 
         // Before we resolve any function symbols we must go through our impls and
         // re-collect the methods within into their proper module. This cannot be

@@ -3,7 +3,6 @@ use acvm::FieldElement;
 use crate::errors::RuntimeError;
 
 use super::{
-    acir_gen::InternalVar,
     anchor::{Anchor, CseAction},
     block::BlockId,
     context::SsaContext,
@@ -48,25 +47,13 @@ pub fn simplify(ctx: &mut SsaContext, ins: &mut Instruction) -> Result<(), Runti
         return Ok(());
     }
 
-    match &mut ins.operation {
-        Operation::Binary(binary) => {
-            if let NodeEval::Const(r_const, r_type) = NodeEval::from_id(ctx, binary.rhs) {
-                if binary.operator == BinaryOp::Div {
-                    binary.rhs = ctx.get_or_create_const(r_const.inverse(), r_type);
-                    binary.operator = BinaryOp::Mul;
-                }
+    if let Operation::Binary(binary) = &mut ins.operation {
+        if let NodeEval::Const(r_const, r_type) = NodeEval::from_id(ctx, binary.rhs) {
+            if binary.operator == BinaryOp::Div && !r_const.is_zero() {
+                binary.rhs = ctx.get_or_create_const(r_const.inverse(), r_type);
+                binary.operator = BinaryOp::Mul;
             }
         }
-        Operation::Intrinsic(opcode, args) => {
-            let args = args
-                .iter()
-                .map(|arg| NodeEval::from_id(ctx, *arg).into_const_value().map(|f| f.to_u128()));
-
-            if let Some(args) = args.collect() {
-                ins.mark = Mark::ReplaceWith(evaluate_intrinsic(ctx, *opcode, args, &ins.res_type));
-            }
-        }
-        _ => (),
     }
 
     Ok(())
@@ -77,30 +64,28 @@ fn evaluate_intrinsic(
     op: acvm::acir::OPCODE,
     args: Vec<u128>,
     res_type: &ObjectType,
-) -> NodeId {
+    block_id: BlockId,
+) -> Vec<NodeId> {
     match op {
         acvm::acir::OPCODE::ToBits => {
             let bit_count = args[1] as u32;
+            let mut result = Vec::new();
 
             if let ObjectType::Pointer(a) = res_type {
-                let new_var = super::node::Variable {
-                    id: NodeId::dummy(),
-                    obj_type: super::node::ObjectType::Pointer(*a),
-                    name: op.to_string(),
-                    root: None,
-                    def: None,
-                    witness: None,
-                    parent_block: ctx.current_block,
-                };
-
                 for i in 0..bit_count {
-                    if args[0] & (1 << i) != 0 {
-                        ctx.mem[*a].values.push(InternalVar::from(FieldElement::one()));
+                    let index = ctx.get_or_create_const(
+                        FieldElement::from(i as i128),
+                        ObjectType::NativeField,
+                    );
+                    let op = if args[0] & (1 << i) != 0 {
+                        Operation::Store { array_id: *a, index, value: ctx.one() }
                     } else {
-                        ctx.mem[*a].values.push(InternalVar::from(FieldElement::zero()));
-                    }
+                        Operation::Store { array_id: *a, index, value: ctx.zero() }
+                    };
+                    let i = Instruction::new(op, ObjectType::NotAnObject, Some(block_id));
+                    result.push(ctx.add_instruction(i));
                 }
-                return ctx.add_variable(new_var, None);
+                return result;
             }
             unreachable!();
         }
@@ -125,10 +110,14 @@ pub fn propagate(ctx: &SsaContext, id: NodeId, modified: &mut bool) -> NodeId {
 }
 
 //common subexpression elimination, starting from the root
-pub fn cse(igen: &mut SsaContext, first_block: BlockId) -> Result<Option<NodeId>, RuntimeError> {
+pub fn cse(
+    igen: &mut SsaContext,
+    first_block: BlockId,
+    stop_on_error: bool,
+) -> Result<Option<NodeId>, RuntimeError> {
     let mut anchor = Anchor::default();
     let mut modified = false;
-    cse_tree(igen, first_block, &mut anchor, &mut modified)
+    cse_tree(igen, first_block, &mut anchor, &mut modified, stop_on_error)
 }
 
 //Perform CSE for the provided block and then process its children following the dominator tree, passing around the anchor list.
@@ -137,11 +126,13 @@ fn cse_tree(
     block_id: BlockId,
     anchor: &mut Anchor,
     modified: &mut bool,
+    stop_on_error: bool,
 ) -> Result<Option<NodeId>, RuntimeError> {
     let mut instructions = Vec::new();
-    let mut res = cse_block_with_anchor(igen, block_id, &mut instructions, anchor, modified)?;
+    let mut res =
+        cse_block_with_anchor(igen, block_id, &mut instructions, anchor, modified, stop_on_error)?;
     for b in igen[block_id].dominated.clone() {
-        let sub_res = cse_tree(igen, b, &mut anchor.clone(), modified)?;
+        let sub_res = cse_tree(igen, b, &mut anchor.clone(), modified, stop_on_error)?;
         if sub_res.is_some() {
             res = sub_res;
         }
@@ -153,21 +144,22 @@ fn cse_tree(
 pub fn full_cse(
     igen: &mut SsaContext,
     first_block: BlockId,
+    report_error: bool,
 ) -> Result<Option<NodeId>, RuntimeError> {
     let mut modified = true;
     let mut result = None;
     while modified {
         modified = false;
         let mut anchor = Anchor::default();
-        result = cse_tree(igen, first_block, &mut anchor, &mut modified)?;
+        result = cse_tree(igen, first_block, &mut anchor, &mut modified, report_error)?;
     }
     Ok(result)
 }
 
-pub fn simple_cse(ctx: &mut SsaContext, block_id: BlockId) {
+pub fn simple_cse(ctx: &mut SsaContext, block_id: BlockId) -> Result<Option<NodeId>, RuntimeError> {
     let mut modified = false;
     let mut instructions = Vec::new();
-    cse_block(ctx, block_id, &mut instructions, &mut modified).unwrap();
+    cse_block(ctx, block_id, &mut instructions, &mut modified)
 }
 
 pub fn cse_block(
@@ -176,7 +168,7 @@ pub fn cse_block(
     instructions: &mut Vec<NodeId>,
     modified: &mut bool,
 ) -> Result<Option<NodeId>, RuntimeError> {
-    cse_block_with_anchor(ctx, block_id, instructions, &mut Anchor::default(), modified)
+    cse_block_with_anchor(ctx, block_id, instructions, &mut Anchor::default(), modified, false)
 }
 
 //Performs common subexpression elimination and copy propagation on a block
@@ -186,6 +178,7 @@ fn cse_block_with_anchor(
     instructions: &mut Vec<NodeId>,
     anchor: &mut Anchor,
     modified: &mut bool,
+    stop_on_error: bool,
 ) -> Result<Option<NodeId>, RuntimeError> {
     let mut new_list = Vec::new();
     let bb = &ctx[block_id];
@@ -352,7 +345,28 @@ fn cse_block_with_anchor(
             update.parent_block = block_id;
 
             let mut update2 = update.clone();
-            simplify(ctx, &mut update2)?;
+            let result = simplify(ctx, &mut update2);
+            if stop_on_error {
+                result?;
+            }
+
+            //cannot simplify to_bits() in the previous call because it get replaced with multiple instructions
+            if let Operation::Intrinsic(opcode, args) = &update2.operation {
+                let args = args.iter().map(|arg| {
+                    NodeEval::from_id(ctx, *arg).into_const_value().map(|f| f.to_u128())
+                });
+
+                if let Some(args) = args.collect() {
+                    update2.mark = Mark::Deleted;
+                    new_list.extend(evaluate_intrinsic(
+                        ctx,
+                        *opcode,
+                        args,
+                        &update2.res_type,
+                        block_id,
+                    ));
+                }
+            }
             let update3 = ctx.get_mut_instruction(*ins_id);
             *update3 = update2;
         }

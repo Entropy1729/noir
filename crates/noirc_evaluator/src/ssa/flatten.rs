@@ -22,7 +22,7 @@ pub fn unroll_tree(
         unroll_into: block_id,
         eval_map: HashMap::new(),
     };
-    while unroll_ctx.to_unroll != BlockId::dummy() {
+    while !unroll_ctx.to_unroll.is_dummy() {
         unroll_block(ctx, &mut unroll_ctx)?;
     }
     //clean-up
@@ -41,7 +41,9 @@ fn eval_block(block_id: BlockId, eval_map: &HashMap<NodeId, NodeEval>, ctx: &mut
         if let Some(ins) = ctx.try_get_mut_instruction(*i) {
             ins.operation = update_operator(&ins.operation, eval_map);
             let ins_id = ins.id;
-            optim::simplify_id(ctx, ins_id).unwrap();
+            // We ignore RunTimeErrors at this stage because unrolling is done before conditionals
+            // While failures must be managed after handling conditionals: For instance if false { b } should not fail whatever b is doing.
+            optim::simplify_id(ctx, ins_id).ok();
         }
     }
 }
@@ -60,7 +62,7 @@ pub fn unroll_until(
     let mut prev = BlockId::dummy();
 
     while b != end {
-        assert_ne!(b, BlockId::dummy(), "could not reach end block");
+        assert!(!b.is_dummy(), "could not reach end block");
         prev = b;
         unroll_block(ctx, unroll_ctx)?;
         b = unroll_ctx.to_unroll;
@@ -125,7 +127,7 @@ pub fn unroll_std_block(
                     Operation::Jmp(block) => assert_eq!(block, next),
                     Operation::Nop => (),
                     _ => {
-                        optim::simplify(ctx, &mut new_ins)?;
+                        optim::simplify(ctx, &mut new_ins).ok(); //ignore RuntimeErrors until conditionals are processed
                         match new_ins.mark {
                             Mark::None => {
                                 let id = ctx.push_instruction(new_ins);
@@ -144,7 +146,7 @@ pub fn unroll_std_block(
                     }
                 }
             }
-            _ => todo!(), //ERROR
+            _ => unreachable!("Block instruction list should only only contain instruction"),
         }
     }
     if unroll_ctx.to_unroll != unroll_ctx.unroll_into
@@ -173,7 +175,7 @@ pub fn unroll_join(
     assert!(join.is_join());
     let body_id = join.right.unwrap();
     let end = unroll_ctx.to_unroll;
-    if unroll_ctx.unroll_into != BlockId::dummy() {
+    if !unroll_ctx.unroll_into.is_dummy() {
         prev = unroll_ctx.unroll_into;
     }
     ssa_ctx.current_block = prev;

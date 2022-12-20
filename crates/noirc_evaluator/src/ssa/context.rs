@@ -1,5 +1,5 @@
 use super::block::{BasicBlock, BlockId};
-use super::conditional::DecisionTree;
+use super::conditional::{DecisionTree, TreeBuilder};
 use super::function::{FuncIndex, SSAFunction};
 use super::inline::StackFrame;
 use super::mem::{ArrayId, Memory};
@@ -13,8 +13,8 @@ use crate::ssa::function;
 use crate::ssa::node::{Mark, Node};
 use crate::Evaluator;
 use acvm::FieldElement;
+use iter_extended::vecmap;
 use noirc_frontend::monomorphisation::ast::{DefinitionId, FuncId};
-use noirc_frontend::util::vecmap;
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
 
@@ -139,11 +139,14 @@ impl SsaContext {
 
     //Display an object for debugging puposes
     fn node_to_string(&self, id: NodeId) -> String {
+        let mut result = String::new();
         if let Some(var) = self.try_get_node(id) {
-            format!("{}", var)
-        } else {
-            format!("unknown {:?}", id.0.into_raw_parts().0)
+            result = format!("{}", var);
         }
+        if result.is_empty() {
+            result = format!("unknown {:?}", id.0.into_raw_parts().0)
+        }
+        result
     }
 
     fn binary_to_string(&self, binary: &node::Binary) -> String {
@@ -243,7 +246,14 @@ impl SsaContext {
     pub fn print_block(&self, b: &block::BasicBlock) {
         println!("************* Block n.{}", b.id.0.into_raw_parts().0);
         println!("Assumption:{:?}", b.assumption);
-        for id in &b.instructions {
+        self.print_instructions(&b.instructions);
+        if b.left.is_some() {
+            println!("Next block: {}", b.left.unwrap().0.into_raw_parts().0);
+        }
+    }
+
+    pub fn print_instructions(&self, instructions: &Vec<NodeId>) {
+        for id in instructions {
             let ins = self.get_instruction(*id);
             let mut str_res = if ins.res_name.is_empty() {
                 format!("{:?}", id.0.into_raw_parts().0)
@@ -258,11 +268,7 @@ impl SsaContext {
             let ins_str = self.operation_to_string(&ins.operation);
             println!("{}: {}", str_res, ins_str);
         }
-        if b.left.is_some() {
-            println!("Next block: {}", b.left.unwrap().0.into_raw_parts().0);
-        }
     }
-
     pub fn print(&self, text: &str) {
         println!("{}", text);
         for (_, b) in self.blocks.iter() {
@@ -518,8 +524,9 @@ impl SsaContext {
     ) -> Result<NodeId, RuntimeError> {
         //Add a new instruction to the nodes arena
         let mut i = Instruction::new(opcode, optype, Some(self.current_block));
-        //Basic simplification
-        optim::simplify(self, &mut i)?;
+        //Basic simplification - we ignore RunTimeErrors when creating an instruction
+        //because they must be managed after handling conditionals. For instance if false { b } should not fail whatever b is doing.
+        optim::simplify(self, &mut i).ok();
 
         if let Mark::ReplaceWith(replacement) = i.mark {
             return Ok(replacement);
@@ -656,23 +663,22 @@ impl SsaContext {
 
         //Optimisation
         block::compute_dom(self);
-        optim::full_cse(self, self.first_block)?;
+        optim::full_cse(self, self.first_block, false)?;
 
         //Flattenning
         self.log(enable_logging, "\nCSE:", "\nunrolling:");
         //Unrolling
         flatten::unroll_tree(self, self.first_block)?;
-
         //reduce conditionals
         let mut decision = DecisionTree::new(self);
-        decision.make_decision_tree(self, self.first_block);
+        let builder = TreeBuilder::new(self.first_block);
+        decision.make_decision_tree(self, builder)?;
         decision.reduce(self, decision.root)?;
-
         //Inlining
         self.log(enable_logging, "reduce", "\ninlining:");
         inline::inline_tree(self, self.first_block, &decision)?;
 
-        block::merge_path(self, self.first_block, BlockId::dummy());
+        block::merge_path(self, self.first_block, BlockId::dummy(), None);
         //The CFG is now fully flattened, so we keep only the first block.
         let mut to_remove = Vec::new();
         for b in &self.blocks {
@@ -686,7 +692,7 @@ impl SsaContext {
         let first_block = self.first_block;
         self[first_block].dominated.clear();
 
-        optim::cse(self, first_block)?;
+        optim::cse(self, first_block, true)?;
 
         //Truncation
         integer::overflow_strategy(self)?;
@@ -697,6 +703,7 @@ impl SsaContext {
             Acir::print_circuit(&evaluator.gates);
             println!("DONE");
         }
+        println!("ACIR gates generated : {}", evaluator.gates.len());
         Ok(())
     }
 
@@ -791,10 +798,33 @@ impl SsaContext {
         }
         if let Some((func, a, idx)) = ret_array {
             if let Some(Instruction {
-                operation: Operation::Call { returned_arrays, .. }, ..
+                operation: Operation::Call { returned_arrays, arguments, .. },
+                ..
             }) = self.try_get_mut_instruction(func)
             {
                 returned_arrays.push((a, idx));
+                //Issue #579: we initialise the array, unless it is also in arguments in which case it is already initialised.
+                let mut init = false;
+                for i in arguments.clone() {
+                    if let ObjectType::Pointer(b) = self.get_object_type(i) {
+                        if a == b {
+                            init = true;
+                        }
+                    }
+                }
+                if !init {
+                    let mut stack = StackFrame::new(self.current_block);
+                    self.init_array(a, &mut stack);
+                    let pos = self[self.current_block]
+                        .instructions
+                        .iter()
+                        .position(|x| *x == func)
+                        .unwrap();
+                    let current_block = self.current_block;
+                    for i in stack.stack {
+                        self[current_block].instructions.insert(pos, i);
+                    }
+                }
             }
             if let Some(i) = self.try_get_mut_instruction(rhs) {
                 i.mark = Mark::ReplaceWith(lhs);
@@ -857,6 +887,17 @@ impl SsaContext {
         let ins_id = self.add_instruction(i);
         stack_frame.push(ins_id);
         ins_id
+    }
+
+    fn init_array(&mut self, array_id: ArrayId, stack_frame: &mut StackFrame) {
+        let len = self.mem[array_id].len;
+        let e_type = self.mem[array_id].element_type;
+        for i in 0..len {
+            let index =
+                self.get_or_create_const(FieldElement::from(i as i128), ObjectType::Unsigned(32));
+            let op_a = Operation::Store { array_id, index, value: self.zero_with_type(e_type) };
+            self.new_instruction_inline(op_a, e_type, stack_frame);
+        }
     }
 
     pub fn memcpy_inline(
@@ -986,6 +1027,57 @@ impl SsaContext {
             let phi_id = self.add_instruction(new_phi);
             self[exit_block].instructions.insert(1, phi_id);
             phi_id
+        }
+    }
+
+    pub fn add_predicate(
+        &mut self,
+        pred: NodeId,
+        instruction: &mut Instruction,
+        stack: &mut StackFrame,
+    ) {
+        let op = &mut instruction.operation;
+
+        match op {
+            Operation::Binary(bin) => {
+                assert!(bin.predicate.is_none());
+                let cond = if let Some(pred_ins) = bin.predicate {
+                    assert_ne!(pred_ins, NodeId::dummy());
+                    if pred == NodeId::dummy() {
+                        pred_ins
+                    } else {
+                        let op = Operation::Binary(node::Binary {
+                            lhs: pred,
+                            rhs: pred_ins,
+                            operator: BinaryOp::Mul,
+                            predicate: None,
+                        });
+                        let cond = self.add_instruction(Instruction::new(
+                            op,
+                            ObjectType::Boolean,
+                            Some(stack.block),
+                        ));
+                        optim::simplify_id(self, cond).unwrap();
+                        stack.push(cond);
+                        cond
+                    }
+                } else {
+                    pred
+                };
+                bin.predicate = Some(cond);
+            }
+            Operation::Constrain(cond, _) => {
+                let operation =
+                    Operation::Cond { condition: pred, val_true: *cond, val_false: self.one() };
+                let c_ins = self.add_instruction(Instruction::new(
+                    operation,
+                    ObjectType::Boolean,
+                    Some(stack.block),
+                ));
+                stack.push(c_ins);
+                *cond = c_ins;
+            }
+            _ => unreachable!(),
         }
     }
 }

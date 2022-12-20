@@ -9,7 +9,7 @@ use super::{
     optim,
 };
 use acvm::{acir::OPCODE, FieldElement};
-use noirc_frontend::util::vecmap;
+use iter_extended::vecmap;
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
 use std::collections::BTreeMap;
@@ -391,7 +391,7 @@ fn block_overflow(
             //we may do that in future when the max_map becomes more used elsewhere (for other optim)
         }
 
-        let old_ins = ctx.try_get_mut_instruction(id).unwrap();
+        let old_ins = ctx.try_get_mut_instruction(ins.id).unwrap();
         *old_ins = ins;
     }
 
@@ -487,7 +487,8 @@ fn get_max_value(ins: &Instruction, max_map: &mut HashMap<NodeId, BigUint>) -> B
                 | OPCODE::Blake2s
                 | OPCODE::Pedersen
                 | OPCODE::FixedBaseScalarMul
-                | OPCODE::ToBits => BigUint::zero(), //pointers do not overflow
+                | OPCODE::ToBits
+                | OPCODE::ToBytes => BigUint::zero(), //pointers do not overflow
                 OPCODE::SchnorrVerify
                 | OPCODE::EcdsaSecp256k1
                 | acvm::acir::OPCODE::MerkleMembership => BigUint::one(), //verify returns 0 or 1

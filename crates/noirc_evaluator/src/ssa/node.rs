@@ -5,9 +5,9 @@ use acvm::acir::native_types::Witness;
 use acvm::acir::OPCODE;
 use acvm::FieldElement;
 use arena;
+use iter_extended::vecmap;
 use noirc_errors::Location;
 use noirc_frontend::monomorphisation::ast::{DefinitionId, FuncId, Type};
-use noirc_frontend::util::vecmap;
 use noirc_frontend::{BinaryOpKind, Signedness};
 use num_bigint::BigUint;
 use num_traits::{FromPrimitive, One};
@@ -429,10 +429,19 @@ impl Instruction {
                         // Delete the constrain, it is always true
                         return Ok(NodeEval::VarOrInstruction(NodeId::dummy()));
                     } else if obj.is_zero() {
-                        return Err(RuntimeErrorKind::UnstructuredError {
-                            message: "Constraint is always false".into(),
+                        if let Some(location) = *location {
+                            return Err(RuntimeError::new(
+                                RuntimeErrorKind::UnstructuredError {
+                                    message: "Constraint is always false".into(),
+                                },
+                                Some(location),
+                            ));
+                        } else {
+                            return Err(RuntimeErrorKind::Spanless(
+                                "Constraint is always false".into(),
+                            )
+                            .into());
                         }
-                        .add_location(*location));
                     }
                 }
             }
@@ -501,7 +510,7 @@ pub enum Operation {
     }, //truncate
 
     Not(NodeId), //(!) Bitwise Not
-    Constrain(NodeId, Location),
+    Constrain(NodeId, Option<Location>),
 
     //control flow
     Jne(NodeId, BlockId), //jump on not equal
@@ -736,6 +745,8 @@ impl Binary {
 
         let l_is_zero = lhs.map_or(false, |x| x.is_zero());
         let r_is_zero = rhs.map_or(false, |x| x.is_zero());
+        let zero_div_error =
+            Err(RuntimeErrorKind::Spanless("Panic - division by zero".to_string()).into());
 
         match &self.operator {
             BinaryOp::Add | BinaryOp::SafeAdd => {
@@ -781,7 +792,7 @@ impl Binary {
 
             BinaryOp::Udiv => {
                 if r_is_zero {
-                    todo!("Panic - division by zero");
+                    return zero_div_error;
                 } else if l_is_zero {
                     return Ok(l_eval); //TODO should we ensure rhs != 0 ???
                 }
@@ -794,7 +805,7 @@ impl Binary {
             }
             BinaryOp::Div => {
                 if r_is_zero {
-                    todo!("Panic - division by zero");
+                    return zero_div_error;
                 } else if l_is_zero {
                     return Ok(l_eval); //TODO should we ensure rhs != 0 ???
                 }
@@ -805,7 +816,7 @@ impl Binary {
             }
             BinaryOp::Sdiv => {
                 if r_is_zero {
-                    todo!("Panic - division by zero");
+                    return zero_div_error;
                 } else if l_is_zero {
                     return Ok(l_eval); //TODO should we ensure rhs != 0 ???
                 }
@@ -816,7 +827,7 @@ impl Binary {
             }
             BinaryOp::Urem | BinaryOp::Srem => {
                 if r_is_zero {
-                    todo!("Panic - division by zero");
+                    return zero_div_error;
                 } else if l_is_zero {
                     return Ok(l_eval); //TODO what is the correct result?
                 }

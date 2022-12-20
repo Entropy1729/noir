@@ -369,8 +369,7 @@ impl Acir {
                 let address = array.adr + i;
                 if let Some(memory) = self.memory_map.get_mut(&address) {
                     if create_witness && memory.witness.is_none() {
-                        let (_, w) =
-                            evaluator.create_intermediate_variable(memory.expression.clone());
+                        let w = evaluator.create_intermediate_variable(memory.expression.clone());
                         self.memory_map.get_mut(&address).unwrap().witness = Some(w);
                     }
                     self.memory_map[&address].clone()
@@ -502,7 +501,7 @@ impl Acir {
                                     } else {
                                         //TODO we should store the witnesses somewhere, else if the inputs are re-used
                                         //we will duplicate the witnesses.
-                                        let (_, w) = evaluator.create_intermediate_variable(
+                                        let w = evaluator.create_intermediate_variable(
                                             self.memory_map[&address].expression.clone(),
                                         );
                                         inputs.push(GadgetInput { witness: w, num_bits });
@@ -526,11 +525,10 @@ impl Acir {
                 }
                 _ => {
                     if self.arith_cache.contains_key(a) {
-                        if let Some(w) = self.arith_cache[a].clone().witness {
-                            inputs.push(GadgetInput { witness: w, num_bits: l_obj.size_in_bits() });
-                        } else {
-                            todo!();
-                        }
+                        let var = self.arith_cache[a].clone();
+                        let witness =
+                            var.witness.unwrap_or_else(|| generate_witness(&var, evaluator));
+                        inputs.push(GadgetInput { witness, num_bits: l_obj.size_in_bits() });
                     } else {
                         dbg!(&l_obj);
                         unreachable!("invalid input")
@@ -556,6 +554,14 @@ impl Acir {
                 let bit_size = ctx.get_as_constant(args[1]).unwrap().to_u128() as u32;
                 let l_c = self.substitute(args[0], evaluator, ctx);
                 outputs = split(&l_c, bit_size, evaluator);
+                if let node::ObjectType::Pointer(a) = res_type {
+                    self.map_array(a, &outputs, ctx);
+                }
+            }
+            OPCODE::ToBytes => {
+                let byte_size = ctx.get_as_constant(args[1]).unwrap().to_u128() as u32;
+                let l_c = self.substitute(args[0], evaluator, ctx);
+                outputs = to_bytes(&l_c, byte_size, evaluator);
                 if let node::ObjectType::Pointer(a) = res_type {
                     self.map_array(a, &outputs, ctx);
                 }
@@ -632,36 +638,57 @@ pub fn evaluate_cmp(
     }
 }
 
+//Decomposition into a list of unsigned integers based on a base2 radix (bits - u1, bytes - u8, etc)
+pub fn to_base2_decomposition(
+    pow: u32,
+    num_limbs: u32,
+    evaluator: &mut Evaluator,
+) -> (Vec<Witness>, Expression) {
+    let mut digits = Expression::default();
+    let mut two_pow = FieldElement::one();
+    let base: i32 = 2;
+    let radix_base = base.pow(pow);
+    let shift = FieldElement::from(radix_base as i128);
+    let mut result = Vec::new();
+    for _ in 0..num_limbs {
+        let radix_witness = evaluator.add_witness_to_cs();
+        result.push(radix_witness);
+        let radix_expr = from_witness(radix_witness);
+        digits = add(&digits, two_pow, &radix_expr);
+        two_pow = two_pow.mul(shift);
+
+        range_constraint(radix_witness, pow, evaluator).unwrap();
+    }
+
+    (result, digits)
+}
+
+//Performs byte decomposition
+pub fn to_bytes(lhs: &InternalVar, byte_size: u32, evaluator: &mut Evaluator) -> Vec<Witness> {
+    assert!(byte_size < FieldElement::max_num_bytes());
+    let (result, bytes) = to_base2_decomposition(8, byte_size, evaluator);
+    evaluator.gates.push(Gate::Directive(Directive::ToBytes {
+        a: lhs.expression.clone(),
+        b: result.clone(),
+        byte_size,
+    }));
+
+    evaluator.gates.push(Gate::Arithmetic(subtract(&lhs.expression, FieldElement::one(), &bytes)));
+
+    result
+}
+
 //Performs bit decomposition
 pub fn split(lhs: &InternalVar, bit_size: u32, evaluator: &mut Evaluator) -> Vec<Witness> {
     assert!(bit_size < FieldElement::max_num_bits());
-    let mut bits = Expression::default();
-    let mut two_pow = FieldElement::one();
-    let two = FieldElement::from(2_i128);
-    let mut result = Vec::new();
-    for _ in 0..bit_size {
-        let bit_witness = evaluator.add_witness_to_cs();
-        result.push(bit_witness);
-        let bit_expr = from_witness(bit_witness);
-        bits = add(&bits, two_pow, &bit_expr);
-        two_pow = two_pow.mul(two);
-        evaluator.gates.push(Gate::Arithmetic(subtract(
-            &mul(&bit_expr, &bit_expr),
-            FieldElement::one(),
-            &bit_expr,
-        )));
-    }
-    let a_witness = generate_witness(lhs, evaluator);
+    let (result, bits) = to_base2_decomposition(1, bit_size, evaluator);
     evaluator.gates.push(Gate::Directive(Directive::Split {
-        a: a_witness,
+        a: lhs.expression.clone(),
         b: result.clone(),
         bit_size,
     }));
-    evaluator.gates.push(Gate::Arithmetic(subtract(
-        &from_witness(a_witness),
-        FieldElement::one(),
-        &bits,
-    )));
+
+    evaluator.gates.push(Gate::Arithmetic(subtract(&lhs.expression, FieldElement::one(), &bits)));
 
     result
 }
@@ -750,7 +777,6 @@ pub fn evaluate_and(
         return const_and(rhs, l_c, bit_size, evaluator);
     }
 
-    let result = evaluator.add_witness_to_cs();
     let a_witness = generate_witness(&lhs, evaluator);
     let b_witness = generate_witness(&rhs, evaluator);
     //TODO checks the cost of the gate vs bit_size (cf. #164)
@@ -761,6 +787,7 @@ pub fn evaluate_and(
             q_c: FieldElement::zero(),
         };
     }
+    let result = evaluator.add_witness_to_cs();
     let bsize = if bit_size % 2 == 1 { bit_size + 1 } else { bit_size };
     assert!(bsize < FieldElement::max_num_bits() - 1);
     evaluator.gates.push(Gate::And(acvm::acir::circuit::gate::AndGate {
@@ -785,16 +812,15 @@ pub fn evaluate_xor(
         return const_xor(rhs, l_c, bit_size, evaluator);
     }
 
-    let result = evaluator.add_witness_to_cs();
-
-    let a_witness = generate_witness(&lhs, evaluator);
-    let b_witness = generate_witness(&rhs, evaluator);
     //TODO checks the cost of the gate vs bit_size (cf. #164)
     if bit_size == 1 {
         let sum = add(&lhs.expression, FieldElement::one(), &rhs.expression);
-        let mul = mul(&lhs.expression, &rhs.expression);
+        let mul = mul_with_witness(evaluator, &lhs.expression, &rhs.expression);
         return subtract(&sum, FieldElement::from(2_i128), &mul);
     }
+    let result = evaluator.add_witness_to_cs();
+    let a_witness = generate_witness(&lhs, evaluator);
+    let b_witness = generate_witness(&rhs, evaluator);
     let bsize = if bit_size % 2 == 1 { bit_size + 1 } else { bit_size };
     assert!(bsize < FieldElement::max_num_bits() - 1);
     evaluator.gates.push(Gate::Xor(acvm::acir::circuit::gate::XorGate {
@@ -821,7 +847,7 @@ pub fn evaluate_or(
 
     if bit_size == 1 {
         let sum = add(&lhs.expression, FieldElement::one(), &rhs.expression);
-        let mul = mul(&lhs.expression, &rhs.expression);
+        let mul = mul_with_witness(evaluator, &lhs.expression, &rhs.expression);
         return subtract(&sum, FieldElement::one(), &mul);
     }
 
@@ -897,8 +923,8 @@ pub fn generate_witness(lhs: &InternalVar, evaluator: &mut Evaluator) -> Witness
     if lhs.expression.mul_terms.is_empty() && lhs.expression.linear_combinations.len() == 1 {
         //TODO check if this case can be optimised
     }
-    let (_, w) = evaluator.create_intermediate_variable(lhs.expression.clone());
-    w //TODO  set lhs.witness = w
+    //TODO  set lhs.witness = the next line
+    evaluator.create_intermediate_variable(lhs.expression.clone())
 }
 
 pub fn evaluate_udiv(

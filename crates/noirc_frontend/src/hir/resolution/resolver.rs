@@ -18,7 +18,7 @@ struct ResolverMeta {
 }
 
 use crate::hir_def::expr::{
-    HirArrayLiteral, HirBinaryOp, HirBlockExpression, HirCallExpression, HirCastExpression,
+    HirBinaryOp, HirBlockExpression, HirCallExpression, HirCastExpression,
     HirConstructorExpression, HirExpression, HirForExpression, HirIdent, HirIfExpression,
     HirIndexExpression, HirInfixExpression, HirLiteral, HirMemberAccess, HirMethodCallExpression,
     HirPrefixExpression,
@@ -30,17 +30,17 @@ use crate::graph::CrateId;
 use crate::hir::def_map::{ModuleDefId, TryFromModuleDefId};
 use crate::hir_def::stmt::{HirAssignStatement, HirLValue, HirPattern};
 use crate::node_interner::{DefinitionId, ExprId, FuncId, NodeInterner, StmtId, StructId};
-use crate::util::vecmap;
 use crate::{
     hir::{def_map::CrateDefMap, resolution::path_resolver::PathResolver},
     BlockExpression, Expression, ExpressionKind, FunctionKind, Ident, Literal, NoirFunction,
-    Statement, UnresolvedArraySize,
+    Statement,
 };
 use crate::{
-    Generics, LValue, NoirStruct, Path, Pattern, Shared, StructType, Type, TypeBinding,
-    TypeVariable, UnresolvedType, ERROR_IDENT,
+    ArrayLiteral, Generics, LValue, NoirStruct, Path, Pattern, Shared, StructType, Type,
+    TypeBinding, TypeVariable, UnresolvedType, ERROR_IDENT,
 };
 use fm::FileId;
+use iter_extended::vecmap;
 use noirc_errors::{Location, Span, Spanned};
 
 use crate::hir::scope::{
@@ -112,12 +112,7 @@ impl<'a> Resolver<'a> {
         self.scopes.start_function();
 
         // Check whether the function has globals in the local module and add them to the scope
-        for (stmt_id, global_info) in self.interner.get_all_globals() {
-            if global_info.local_id == self.path_resolver.local_module_id() {
-                let global_stmt = self.interner.let_statement(&stmt_id);
-                self.add_global_variable_decl(global_info.ident, Some(global_stmt.expression));
-            }
-        }
+        self.resolve_local_globals();
 
         self.add_generics(func.def.generics.clone());
 
@@ -282,8 +277,8 @@ impl<'a> Resolver<'a> {
         match typ {
             UnresolvedType::FieldElement(comptime) => Type::FieldElement(comptime),
             UnresolvedType::Array(size, elem) => {
-                let resolved_size = match size {
-                    UnresolvedArraySize::Variable => {
+                let resolved_size = match &size {
+                    None => {
                         let id = self.interner.next_type_variable_id();
                         let typevar = Shared::new(TypeBinding::Unbound(id));
                         new_variables.push((id, typevar.clone()));
@@ -293,9 +288,9 @@ impl<'a> Resolver<'a> {
                         // require users to explicitly be generic over array lengths.
                         Type::NamedGeneric(typevar, Rc::new("".into()))
                     }
-                    UnresolvedArraySize::Fixed(length) => Type::ArrayLength(length),
-                    UnresolvedArraySize::FixedVariable(path) => {
-                        self.resolve_fixed_variable_array_length(path)
+                    Some(expr) => {
+                        let len = self.eval_array_length(expr);
+                        Type::ArrayLength(len)
                     }
                 };
                 let elem = Box::new(self.resolve_type_inner(*elem, new_variables));
@@ -327,45 +322,6 @@ impl<'a> Resolver<'a> {
             UnresolvedType::Tuple(fields) => {
                 Type::Tuple(vecmap(fields, |field| self.resolve_type_inner(field, new_variables)))
             }
-        }
-    }
-
-    fn resolve_fixed_variable_array_length(&mut self, path: Path) -> Type {
-        let hir_ident = self.get_ident_from_path(path.clone());
-
-        let definition_info = self.interner.definition(hir_ident.id);
-        if definition_info.mutable {
-            self.push_err(ResolverError::ExpectedComptimeVariable {
-                name: path.as_string(),
-                span: path.span(),
-            });
-            return Type::Error;
-        }
-
-        if let Some(rhs_expr_id) = definition_info.rhs {
-            let length = self.get_fixed_variable_array_length(&rhs_expr_id);
-            Type::ArrayLength(length)
-        } else {
-            self.push_err(ResolverError::MissingRhsExpr {
-                name: path.as_string(),
-                span: path.span(),
-            });
-            Type::Error
-        }
-    }
-
-    fn get_fixed_variable_array_length(&self, expr_id: &ExprId) -> u64 {
-        let expr = self.interner.expression(expr_id);
-        match expr {
-            HirExpression::Literal(literal) => match literal {
-                HirLiteral::Integer(field_element) => {
-                    field_element.try_to_u64().expect("field element does not fit into u128")
-                }
-                _ => {
-                    panic!("literal used in fixed variable array length must be an integer literal")
-                }
-            },
-            _ => panic!("expression in global statement is not a literal"),
         }
     }
 
@@ -419,6 +375,9 @@ impl<'a> Resolver<'a> {
     ) -> (Generics, BTreeMap<Ident, Type>, Vec<ResolverError>) {
         let generics = self.add_generics(unresolved.generics);
 
+        // Check whether the struct definition has globals in the local module and add them to the scope
+        self.resolve_local_globals();
+
         let fields = unresolved
             .fields
             .into_iter()
@@ -426,6 +385,15 @@ impl<'a> Resolver<'a> {
             .collect();
 
         (generics, fields, self.errors)
+    }
+
+    fn resolve_local_globals(&mut self) {
+        for (stmt_id, global_info) in self.interner.get_all_globals() {
+            if global_info.local_id == self.path_resolver.local_module_id() {
+                let global_stmt = self.interner.let_statement(&stmt_id);
+                self.add_global_variable_decl(global_info.ident, Some(global_stmt.expression));
+            }
+        }
     }
 
     /// Extract metadata from a NoirFunction
@@ -549,10 +517,14 @@ impl<'a> Resolver<'a> {
             }
             ExpressionKind::Literal(literal) => HirExpression::Literal(match literal {
                 Literal::Bool(b) => HirLiteral::Bool(b),
-                Literal::Array(arr) => HirLiteral::Array(HirArrayLiteral {
-                    contents: vecmap(arr.contents, |elem| self.resolve_expression(elem)),
-                    length: arr.length,
-                }),
+                Literal::Array(ArrayLiteral::Standard(elems)) => {
+                    HirLiteral::Array(vecmap(elems, |elem| self.resolve_expression(elem)))
+                }
+                Literal::Array(ArrayLiteral::Repeated { repeated_element, length }) => {
+                    let len = self.eval_array_length(&length);
+                    let elem = self.resolve_expression(*repeated_element);
+                    HirLiteral::Array(vec![elem; len.try_into().unwrap()])
+                }
                 Literal::Integer(integer) => HirLiteral::Integer(integer),
                 Literal::Str(str) => HirLiteral::Str(str),
             }),
@@ -834,6 +806,121 @@ impl<'a> Resolver<'a> {
     pub fn intern_block(&mut self, block: BlockExpression) -> ExprId {
         let hir_block = self.resolve_block(block);
         self.interner.push_expr(hir_block)
+    }
+
+    fn eval_array_length(&mut self, length: &Expression) -> u64 {
+        match self.try_eval_array_length(length).map(|length| length.try_into()) {
+            Ok(Ok(length_value)) => return length_value,
+            Ok(Err(_cast_err)) => {
+                self.push_err(ResolverError::IntegerTooLarge { span: length.span })
+            }
+            Err(Some(error)) => self.push_err(error),
+            Err(None) => (),
+        }
+        0
+    }
+
+    /// This function is a mini interpreter inside name resolution.
+    /// We should eventually get rid of it and only have 1 evaluator - the existing
+    /// one inside the ssa pass. Doing this would mean ssa would need to handle these
+    /// sugared array forms but would let users use any comptime expressions, including functions,
+    /// inside array lengths.
+    fn try_eval_array_length(
+        &mut self,
+        length: &Expression,
+    ) -> Result<u128, Option<ResolverError>> {
+        let span = length.span;
+        match &length.kind {
+            ExpressionKind::Literal(Literal::Integer(int)) => {
+                int.try_into_u128().ok_or(Some(ResolverError::IntegerTooLarge { span }))
+            }
+            ExpressionKind::Ident(ident) => {
+                let ident: Ident = Spanned::from(span, ident.to_owned()).into();
+                let ident = self.find_variable(&ident);
+                self.try_eval_array_length_ident(ident.id, span)
+            }
+            ExpressionKind::Path(path) => {
+                let ident = self.get_ident_from_path(path.clone());
+                self.try_eval_array_length_ident(ident.id, span)
+            }
+            ExpressionKind::Prefix(operator) => {
+                let value = self.try_eval_array_length(&operator.rhs)?;
+                match operator.operator {
+                    crate::UnaryOp::Minus => Ok(0 - value),
+                    crate::UnaryOp::Not => Ok(!value),
+                }
+            }
+            ExpressionKind::Infix(operator) => {
+                let lhs = self.try_eval_array_length(&operator.lhs)?;
+                let rhs = self.try_eval_array_length(&operator.rhs)?;
+                match operator.operator.contents {
+                    crate::BinaryOpKind::Add => Ok(lhs + rhs),
+                    crate::BinaryOpKind::Subtract => Ok(lhs - rhs),
+                    crate::BinaryOpKind::Multiply => Ok(lhs * rhs),
+                    crate::BinaryOpKind::Divide => Ok(lhs / rhs),
+                    crate::BinaryOpKind::ShiftRight => Ok(lhs >> rhs),
+                    crate::BinaryOpKind::ShiftLeft => Ok(lhs << rhs),
+                    crate::BinaryOpKind::Modulo => Ok(lhs % rhs),
+                    crate::BinaryOpKind::And => Ok(lhs & rhs),
+                    crate::BinaryOpKind::Or => Ok(lhs | rhs),
+                    crate::BinaryOpKind::Xor => Ok(lhs ^ rhs),
+
+                    crate::BinaryOpKind::Equal
+                    | crate::BinaryOpKind::NotEqual
+                    | crate::BinaryOpKind::Less
+                    | crate::BinaryOpKind::LessEqual
+                    | crate::BinaryOpKind::Greater
+                    | crate::BinaryOpKind::GreaterEqual => {
+                        Err(Some(ResolverError::InvalidArrayLengthExpr { span }))
+                    }
+                }
+            }
+
+            ExpressionKind::Literal(_)
+            | ExpressionKind::Block(_)
+            | ExpressionKind::Index(_)
+            | ExpressionKind::Call(_)
+            | ExpressionKind::MethodCall(_)
+            | ExpressionKind::Constructor(_)
+            | ExpressionKind::MemberAccess(_)
+            | ExpressionKind::Cast(_)
+            | ExpressionKind::For(_)
+            | ExpressionKind::If(_)
+            | ExpressionKind::Tuple(_) => Err(Some(ResolverError::InvalidArrayLengthExpr { span })),
+
+            ExpressionKind::Error => Err(None),
+        }
+    }
+
+    fn try_eval_array_length_ident(
+        &mut self,
+        id: DefinitionId,
+        span: Span,
+    ) -> Result<u128, Option<ResolverError>> {
+        if id == DefinitionId::dummy_id() {
+            return Err(None); // error already reported
+        }
+
+        let definition = self.interner.definition(id);
+        match definition.rhs {
+            Some(rhs) if definition.is_global || !definition.mutable => {
+                self.try_eval_array_length_id(rhs, span)
+            }
+            _ => Err(Some(ResolverError::InvalidArrayLengthExpr { span })),
+        }
+    }
+
+    fn try_eval_array_length_id(
+        &self,
+        rhs: ExprId,
+        span: Span,
+    ) -> Result<u128, Option<ResolverError>> {
+        match self.interner.expression(&rhs) {
+            HirExpression::Literal(HirLiteral::Integer(int)) => {
+                int.try_into_u128().ok_or(Some(ResolverError::IntegerTooLarge { span }))
+            }
+            _other => Err(Some(ResolverError::InvalidArrayLengthExpr { span })),
+        }
     }
 }
 
