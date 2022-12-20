@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub struct Driver {
-    context: Context,
+    pub context: Context,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
