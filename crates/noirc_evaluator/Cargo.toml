@@ -10,7 +10,8 @@ edition = "2018"
 noirc_frontend = { path = "../noirc_frontend" }
 noirc_errors = { path = "../noirc_errors" }
 noirc_abi = { path = "../noirc_abi" }
-acvm = { git = "https://github.com/noir-lang/noir" }
+# acvm = { git = "https://github.com/noir-lang/noir" }
+acvm = { path = "../acvm" }
 arena = { path = "../arena" }
 fm = { path = "../fm" }
 iter-extended = { path = "../iter-extended" }
@@ -18,3 +19,13 @@ lazy_static = "1.4.0"
 thiserror = "1.0.21"
 num-bigint = "0.4"
 num-traits = "0.2.8"
+
+[features]
+std = ["fm/std"]
+wasm = ["fm/wasm"]
+bn254 = ["acvm/bn254", "noirc_frontend/bn254_std", "noirc_abi/bn254"]
+bls12_381 = ["acvm/bls12_381", "noirc_frontend/bls12_381", "noirc_abi/bls12_381"]
+bn254_std = ["bn254", "std"]
+bn254_wasm = ["bn254", "wasm"]
+bls12_381_std = ["bls12_381", "std"]
+bls12_381_wasm = ["bls12_381", "wasm"]

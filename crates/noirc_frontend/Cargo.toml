@@ -7,7 +7,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-acvm = { git = "https://github.com/noir-lang/noir" }
+# acvm = { git = "https://github.com/noir-lang/noir" }
+acvm = { path = "../acvm" }
 noirc_abi = { path = "../noirc_abi" }
 noirc_errors = { path = "../noirc_errors" }
 fm = { path = "../fm" }
@@ -18,3 +19,8 @@ thiserror = "1.0.21"
 pathdiff = "0.2"
 smol_str = "0.1.17"
 rustc-hash = "1.1.0"
+
+[features]
+bn254 = ["acvm/bn254", "noirc_abi/bn254"]
+bls12_381 = ["acvm/bls12_381"]
+bn254_std = ["bn254", "fm/std"]
