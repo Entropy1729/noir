@@ -1,3 +1,4 @@
+use std::num::TryFromIntError;
 use std::path::Path;
 
 use acvm::{PartialWitnessGenerator, FieldElement};
@@ -82,6 +83,13 @@ pub(crate) fn execute_program(
 ) -> Result<WitnessMap, CliError> {
     let mut solved_witness = compiled_program.abi.encode(inputs_map, None)?;
 
+    println!("UNSOLVED WITNESSES: {solved_witness:?}");
+    
+    let backend = crate::backends::ConcreteBackend;
+    backend.solve(&mut solved_witness, compiled_program.circuit.opcodes.clone())?;
+    
+    println!("SOLVED WITNESSES: {solved_witness:?}");
+    
     let num_witnesses = compiled_program.circuit.num_vars();
     let flattened_witnesses = (1..num_witnesses)
         .map(|wit_index| {
@@ -91,16 +99,14 @@ pub(crate) fn execute_program(
                 .map_or(FieldElement::zero(), |field| *field)
         })
         .collect();
-
-    println!("{}", compiled_program.circuit);
-    println!("{:#?}", serde_json::to_string(&RawR1CS::new(compiled_program.circuit.clone(), flattened_witnesses)).unwrap());
-
-    let backend = crate::backends::ConcreteBackend;
-    backend.solve(&mut solved_witness, compiled_program.circuit.opcodes.clone())?;
-
+    let r1cs = RawR1CS::new(compiled_program.circuit.clone(), flattened_witnesses);
+    println!("{:?}", serde_json::to_string(&r1cs));
+    
     Ok(solved_witness)
 }
 
+
+use ark_serialize::CanonicalSerialize;
 // AcirCircuit and AcirArithGate are R1CS-friendly structs.
 //
 // The difference between these structures and the ACIR structure that the compiler uses is the following:
@@ -108,47 +114,66 @@ pub(crate) fn execute_program(
 // - These structures only support arithmetic gates, while the compiler has other
 // gate types. These can be added later once the backend knows how to deal with things like XOR
 // or once ACIR is taught how to do convert these black box functions to Arithmetic gates.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub struct RawR1CS {
     pub gates: Vec<RawGate>,
-    pub public_inputs: PublicInputs,
+    pub public_inputs: Vec<Witness>,
+    #[serde(serialize_with = "serialize_felts")]
     pub values: Vec<Fr>,
-    pub num_variables: usize,
-    pub num_constraints: usize,
+    pub num_variables: u64,
+    pub num_constraints: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, serde::Serialize)]
 pub struct RawGate {
-    pub mul_terms: Vec<(Fr, Witness, Witness)>,
-    pub add_terms: Vec<(Fr, Witness)>,
+    pub mul_terms: Vec<MulTerm>,
+    pub add_terms: Vec<AddTerm>,
+    #[serde(serialize_with = "serialize_felt")]
     pub constant_term: Fr,
 }
 
+#[derive(Clone)]
+pub struct MulTerm {
+    pub coefficient: Fr,
+    pub multiplicand: Witness,
+    pub multiplier: Witness,
+}
+
+#[derive(Clone)]
+pub struct AddTerm {
+    pub coefficient: Fr,
+    pub sum: Witness,
+}
+
 impl RawR1CS {
-    #[allow(dead_code)]
-    pub fn new(acir: Circuit, values: Vec<FieldElement>) -> Self {
-        let num_constraints = Self::num_constraints(&acir);
+    pub fn new(
+        acir: Circuit,
+        values: Vec<acvm::FieldElement>,
+    ) -> Self {
+        let num_constraints: u64 = Self::num_constraints(&acir).try_into().unwrap();
         // Currently non-arithmetic gates are not supported
         // so we extract all of the arithmetic gates only
-        let gates: Vec<_> = acir
-            .opcodes
+        let mut gates = Vec::new();
+        acir.opcodes
             .into_iter()
             .filter(Opcode::is_arithmetic)
-            .map(|opcode| RawGate::new(opcode.arithmetic().unwrap()))
-            .collect();
+            .for_each(|opcode| {
+                let expression = opcode.arithmetic().unwrap();
+                gates.push(RawGate::new(expression));
+            });
 
         let values: Vec<Fr> = values.into_iter().map(from_felt).collect();
 
         Self {
             gates,
             values,
-            num_variables: (acir.current_witness_index + 1).try_into().unwrap(),
-            public_inputs: acir.public_inputs,
+            num_variables: u64::from(acir.current_witness_index) + 1,
+            public_inputs: acir.public_inputs.0.into_iter().collect(),
             num_constraints,
         }
     }
 
-    fn num_constraints(acir: &Circuit) -> usize {
+    pub fn num_constraints(acir: &Circuit) -> usize {
         // each multiplication term adds an extra constraint
         let mut num_opcodes = acir.opcodes.len();
 
@@ -156,7 +181,7 @@ impl RawR1CS {
             match opcode {
                 Opcode::Arithmetic(arith) => num_opcodes += arith.num_mul_terms() + 1, // plus one for the linear combination gate
                 Opcode::Directive(_) => (),
-                _ => panic!(),
+                _ => todo!()
             }
         }
 
@@ -165,20 +190,24 @@ impl RawR1CS {
 }
 
 impl RawGate {
-    #[allow(dead_code)]
     pub fn new(arithmetic_gate: Expression) -> Self {
-        let converted_mul_terms: Vec<_> = arithmetic_gate
+        let converted_mul_terms: Vec<MulTerm> = arithmetic_gate
             .mul_terms
             .into_iter()
-            .map(|(coefficient, multiplicand, multiplier)| {
-                (from_felt(coefficient), multiplicand, multiplier)
+            .map(|(coefficient, multiplicand, multiplier)| MulTerm {
+                coefficient: from_felt(coefficient),
+                multiplicand,
+                multiplier,
             })
             .collect();
 
         let converted_linear_combinations: Vec<_> = arithmetic_gate
             .linear_combinations
             .into_iter()
-            .map(|(coefficient, sum)| (from_felt(coefficient), sum))
+            .map(|(coefficient, sum)| AddTerm {
+                coefficient: from_felt(coefficient),
+                sum,
+            })
             .collect();
 
         Self {
@@ -189,76 +218,146 @@ impl RawGate {
     }
 }
 
-fn from_felt(felt: FieldElement) -> Fr {
+pub fn from_felt(felt: acvm::FieldElement) -> Fr {
     felt.into_repr()
 }
 
-impl Serialize for RawR1CS {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+impl Copy for MulTerm {}
+impl Copy for AddTerm {}
+
+impl std::fmt::Debug for MulTerm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Coefficient: {:?}", self.coefficient.0 .0)?;
+        writeln!(f, "Multiplicand: {:?}", self.multiplicand.0)?;
+        writeln!(f, "Multiplier: {:?}", self.multiplier.0)?;
+        writeln!(f)
+    }
+}
+
+impl std::fmt::Debug for AddTerm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Coefficient: {:?}", self.coefficient.0 .0)?;
+        writeln!(f, "Sum: {:?}", self.sum.0)?;
+        writeln!(f)
+    }
+}
+
+impl std::fmt::Debug for RawGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.mul_terms.fmt(f)?;
+        self.add_terms.fmt(f)?;
+        writeln!(f, "Constant term: {:?}", self.constant_term.0 .0)?;
+        writeln!(f)
+    }
+}
+
+impl std::fmt::Debug for RawR1CS {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.gates.fmt(f)?;
+        writeln!(
+            f,
+            "Public Inputs: {:?}",
+            self.public_inputs
+                .iter()
+                .map(|public_input| public_input.0)
+                .collect::<Vec<_>>()
+        )?;
+        writeln!(
+            f,
+            "Values: {:?}",
+            self.values
+                .iter()
+                .map(|value| value.0 .0)
+                .collect::<Vec<_>>()
+        )?;
+        writeln!(f, "Number of variables: {}", self.num_variables)?;
+        writeln!(f, "Number of constraints: {}", self.num_constraints)?;
+        writeln!(f)
+    }
+}
+
+impl Serialize for MulTerm {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        let mut s = serializer.serialize_struct("RawR1CS", 4)?;
+        let mut serialized_coefficient = Vec::new();
+        self.coefficient
+            .serialize_uncompressed(&mut serialized_coefficient)
+            .map_err(serde::ser::Error::custom)?;
+        // Turn little-endian to big-endian.
+        serialized_coefficient.reverse();
+        let encoded_coefficient = hex::encode(serialized_coefficient);
 
-        let mut serializable_values: Vec<Vec<u8>> = Vec::new();
-        for value in &self.values {
-            let mut serialized_value = Vec::new();
-            ark_serialize::CanonicalSerialize::serialize_uncompressed(value, &mut serialized_value)
-                .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
-            serializable_values.push(serialized_value);
-        }
-
-        s.serialize_field("gates", &self.gates)?;
-        s.serialize_field("public_inputs", &self.public_inputs)?;
-        s.serialize_field("values", &serializable_values)?;
-        s.serialize_field("num_variables", &self.num_variables)?;
+        let mut s = serializer.serialize_struct("MulTerm", 3)?;
+        s.serialize_field("coefficient", &encoded_coefficient)?;
+        s.serialize_field("multiplicand", &self.multiplicand)?;
+        s.serialize_field("multiplier", &self.multiplier)?;
         s.end()
     }
 }
 
-impl Serialize for RawGate {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+impl Serialize for AddTerm {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        let mut s = serializer.serialize_struct("RawGate", 3)?;
+        let mut serialized_coefficient = Vec::new();
+        self.coefficient
+            .serialize_uncompressed(&mut serialized_coefficient)
+            .map_err(serde::ser::Error::custom)?;
+        // Turn little-endian to big-endian.
+        serialized_coefficient.reverse();
+        let encoded_coefficient = hex::encode(serialized_coefficient);
 
-        let mut serializable_mul_terms: Vec<(Vec<u8>, Witness, Witness)> = Vec::new();
-        for (coefficient, multiplier, multiplicand) in &self.mul_terms {
-            let mut serialized_coefficient = Vec::new();
-            ark_serialize::CanonicalSerialize::serialize_uncompressed(
-                coefficient,
-                &mut serialized_coefficient,
-            )
-            .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
-            serializable_mul_terms.push((
-                serialized_coefficient,
-                *multiplicand,
-                *multiplier,
-            ));
-        }
-
-        let mut serializable_add_terms: Vec<(Vec<u8>, Witness)> = Vec::new();
-        for (coefficient, sum) in &self.add_terms {
-            let mut serialized_coefficient = Vec::new();
-            ark_serialize::CanonicalSerialize::serialize_uncompressed(
-                coefficient,
-                &mut serialized_coefficient,
-            )
-            .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
-            serializable_add_terms.push((serialized_coefficient, *sum));
-        }
-
-        let mut serializable_constant_term = Vec::new();
-        ark_serialize::CanonicalSerialize::serialize_uncompressed(
-            &self.constant_term,
-            &mut serializable_constant_term,
-        )
-        .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
-
-        s.serialize_field("mul_terms", &serializable_add_terms)?;
-        s.serialize_field("add_terms", &serializable_add_terms)?;
-        s.serialize_field("constant_term", &serializable_constant_term)?;
+        let mut s = serializer.serialize_struct("AddTerm", 2)?;
+        s.serialize_field("coefficient", &encoded_coefficient)?;
+        s.serialize_field("sum", &self.sum)?;
         s.end()
     }
+}
+
+pub fn serialize_felt_unchecked(felt: &Fr) -> Vec<u8> {
+    let mut serialized_felt = Vec::new();
+    #[allow(clippy::unwrap_used)]
+    felt.serialize_uncompressed(&mut serialized_felt).unwrap();
+    // Turn little-endian to big-endian.
+    serialized_felt.reverse();
+    serialized_felt
+}
+
+pub fn serialize_felt<S>(
+    felt: &Fr,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::ser::Serializer,
+{
+    let mut serialized_felt = Vec::new();
+    felt.serialize_uncompressed(&mut serialized_felt)
+        .map_err(serde::ser::Error::custom)?;
+    // Turn little-endian to big-endian.
+    serialized_felt.reverse();
+    let encoded_coefficient = hex::encode(serialized_felt);
+    serializer.serialize_str(&encoded_coefficient)
+}
+
+pub fn serialize_felts<S>(
+    felts: &[Fr],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::ser::Serializer,
+{
+    let mut buff: Vec<u8> = Vec::new();
+    let n_felts: u32 = felts.len().try_into().map_err(serde::ser::Error::custom)?;
+    buff.extend_from_slice(&n_felts.to_be_bytes());
+    buff.extend_from_slice(
+        &felts
+            .iter()
+            .flat_map(serialize_felt_unchecked)
+            .collect::<Vec<u8>>(),
+    );
+    let encoded_buff = hex::encode(buff);
+    serializer.serialize_str(&encoded_buff)
 }

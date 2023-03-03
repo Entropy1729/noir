@@ -6,6 +6,8 @@ cfg_if::cfg_if! {
     } else if #[cfg(feature = "marlin")] {
         // R1CS_MARLIN_ARKWORKS
         pub(crate) use marlin_arkworks_backend::Marlin as ConcreteBackend;
+    } else if #[cfg(feature = "gnark_groth16_bn254")] {
+        pub(crate) use noir_backend_using_gnark::Gnark as ConcreteBackend;
     } else {
         compile_error!("please specify a backend to compile with");
     }

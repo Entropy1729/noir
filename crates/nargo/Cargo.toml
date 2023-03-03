@@ -31,15 +31,22 @@ hex = "0.4.2"
 termcolor = "1.1.2"
 tempdir = "0.3.7"
 
+serde_json = "1"
+ark-serialize = "0.4"
+ark-bn254 = "0.4"
+
 # Backends
 aztec_backend = { optional = true, package = "barretenberg_static_lib", git = "https://github.com/noir-lang/aztec_backend", rev = "74b4d8d8b118e4477880c04149e5e9d93d388384" }
 aztec_wasm_backend = { optional = true, package = "barretenberg_wasm", git = "https://github.com/noir-lang/aztec_backend", rev = "74b4d8d8b118e4477880c04149e5e9d93d388384" }
 marlin_arkworks_backend = { optional = true, git = "https://github.com/noir-lang/marlin_arkworks_backend", rev = "144378edad821bfaa52bf2cacca8ecc87514a4fc" }
+noir_backend_using_gnark = { optional = true, path = "../../../noir_backend_using_gnark" }
 color-eyre = "0.6.2"
 
 [features]
-default = ["plonk_bn254"]
+default = ["gnark_groth16_bn254"]
+# default = ["plonk_bn254"]
 # The plonk backend can only use bn254, so we do not specify the field
 plonk_bn254 = ["aztec_backend"]
 marlin = ["marlin_arkworks_backend/bls12_381"]
 plonk_bn254_wasm = ["aztec_wasm_backend"]
+gnark_groth16_bn254 = ["noir_backend_using_gnark"]
