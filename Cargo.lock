@@ -2255,6 +2255,7 @@ dependencies = [
 [[package]]
 name = "noir_backend_using_gnark"
 version = "0.1.0"
+source = "git+https://github.com/LambdaClass/noir_backend_using_gnark?branch=integration#8a0e9b17b9a1c48233e00e87308682a80c739177"
 dependencies = [
  "acvm 0.5.0",
  "ark-bls12-381 0.4.0",
