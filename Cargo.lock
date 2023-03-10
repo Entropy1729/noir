@@ -2224,8 +2224,6 @@ name = "nargo"
 version = "0.2.0"
 dependencies = [
  "acvm 0.5.0",
- "ark-bn254 0.4.0",
- "ark-serialize 0.4.1",
  "barretenberg_static_lib",
  "barretenberg_wasm",
  "build-data",
@@ -2244,7 +2242,6 @@ dependencies = [
  "noirc_frontend",
  "rustc_version 0.4.0",
  "serde",
- "serde_json",
  "tempdir",
  "termcolor",
  "thiserror",
@@ -2255,7 +2252,7 @@ dependencies = [
 [[package]]
 name = "noir_backend_using_gnark"
 version = "0.1.0"
-source = "git+https://github.com/LambdaClass/noir_backend_using_gnark?branch=integration#8a0e9b17b9a1c48233e00e87308682a80c739177"
+source = "git+https://github.com/LambdaClass/noir_backend_using_gnark?branch=implement_plonk_backend_go#800b3d723eeaab88232c0476be6db955e3f10b5d"
 dependencies = [
  "acvm 0.5.0",
  "ark-bls12-381 0.4.0",
@@ -2265,6 +2262,7 @@ dependencies = [
  "cfg-if 1.0.0",
  "hex",
  "hex-literal",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "thiserror",
