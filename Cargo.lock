@@ -2252,7 +2252,7 @@ dependencies = [
 [[package]]
 name = "noir_backend_using_gnark"
 version = "0.1.0"
-source = "git+https://github.com/LambdaClass/noir_backend_using_gnark?branch=implement_plonk_backend_go#800b3d723eeaab88232c0476be6db955e3f10b5d"
+source = "git+https://github.com/LambdaClass/noir_backend_using_gnark?branch=implement_plonk_backend_go#743649e1f537f253a43f2fa259a70435ab84e04f"
 dependencies = [
  "acvm 0.5.0",
  "ark-bls12-381 0.4.0",
