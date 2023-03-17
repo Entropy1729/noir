@@ -40,10 +40,10 @@ noir_backend_using_gnark = { optional = true, git = "https://github.com/LambdaCl
 color-eyre = "0.6.2"
 
 [features]
-default = ["gnark_groth16_bn254"]
+default = ["gnark_plonk_bn254"]
 # default = ["plonk_bn254"]
 # The plonk backend can only use bn254, so we do not specify the field
 plonk_bn254 = ["aztec_backend"]
 marlin = ["marlin_arkworks_backend/bls12_381"]
 plonk_bn254_wasm = ["aztec_wasm_backend"]
-gnark_groth16_bn254 = ["noir_backend_using_gnark"]
+gnark_plonk_bn254 = ["noir_backend_using_gnark"]
